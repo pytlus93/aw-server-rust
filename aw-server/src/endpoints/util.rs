@@ -305,6 +305,10 @@ use aw_datastore::DatastoreError;
 impl From<DatastoreError> for HttpErrorJson {
     fn from(val: DatastoreError) -> Self {
         match val {
+            DatastoreError::ProjectIdempotencyConflict => HttpErrorJson::new(
+                Status::Conflict,
+                "Idempotency key already used for a different request".into(),
+            ),
             DatastoreError::ProjectConflict { expected, actual } => HttpErrorJson::new(
                 Status::PreconditionFailed,
                 format!("Project revision conflict: expected {expected}, actual {actual}"),

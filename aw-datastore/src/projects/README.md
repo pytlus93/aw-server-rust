@@ -1,4 +1,4 @@
-# Project storage foundation (module schema 1)
+# Project storage foundation (module schema 2)
 
 This module uses the host's existing SQLite connection and worker lifecycle.
 It creates only `pt_` tables, preserves AW `user_version`, and leaves bucket,
@@ -22,7 +22,7 @@ datastore suite validates bucket deletion, replacement and migration behavior.
 The schema stores indexed relational identifiers, parents, names and mapping date
 ranges plus serialized typed node/mapping bodies. These bodies currently include
 basic billing/reporting enums. Rates, fees, currency, workspace name/timezone,
-per-entity revisions and idempotency keys will arrive with the remaining stage-1
+per-entity revisions will arrive with the remaining stage-1
 policy and API work, through new migrations. Snapshot revisions currently detect
 concurrent edits across the whole workspace. Snapshot replacement is not intended
 as a public bulk-overwrite endpoint or the final efficient per-entity CRUD adapter.
@@ -53,3 +53,12 @@ Validation on Windows with Rust 1.99.0:
 
 No API, UI, installed-host lifecycle, crash-injection or cross-platform validation
 is implied by these synthetic SQLite tests.
+
+Schema 2 adds persistent idempotency records. Same-key/same-request replay returns
+the original committed snapshot, including its historical revision. Key reuse for
+a different request is rejected. Savepoints atomically roll back the edit, audit
+and key if record insertion fails. Successful keys and responses are retained
+indefinitely in the local database; no pruning is implemented. Migration 1 is
+unchanged and checksummed upgrades from it are supported. Run the repository's
+`scripts/validate-project-tracking.ps1` for current local checks; GitHub Actions is
+not used.

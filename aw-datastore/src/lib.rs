@@ -60,6 +60,7 @@ impl fmt::Debug for DatastoreMethod {
 pub enum DatastoreError {
     ProjectConflict { expected: i64, actual: i64 },
     InvalidProjectData(String),
+    ProjectIdempotencyConflict,
     NoSuchBucket(String),
     BucketAlreadyExists(String),
     NoSuchKey(String),

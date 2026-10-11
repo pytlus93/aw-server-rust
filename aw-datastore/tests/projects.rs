@@ -124,9 +124,12 @@ fn migration_is_idempotent_and_preserves_aw_schema_version() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(count, 1);
-    conn.execute("UPDATE pt_schema_migrations SET version=2", [])
-        .unwrap();
+    assert_eq!(count, 2);
+    conn.execute(
+        "UPDATE pt_schema_migrations SET version=3 WHERE version=2",
+        [],
+    )
+    .unwrap();
     assert!(aw_datastore::DatastoreInstance::new(&conn, true).is_err());
 }
 
@@ -134,7 +137,7 @@ fn migration_is_idempotent_and_preserves_aw_schema_version() {
 fn read_only_legacy_open_does_not_add_project_tables() {
     let conn = Connection::open_in_memory().unwrap();
     aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
-    conn.execute_batch("DROP TABLE pt_domain_revisions; DROP TABLE pt_activity_id_mappings; DROP TABLE pt_nodes; DROP TABLE pt_workspace; DROP TABLE pt_schema_migrations").unwrap();
+    conn.execute_batch("DROP TABLE pt_idempotency; DROP TABLE pt_domain_revisions; DROP TABLE pt_activity_id_mappings; DROP TABLE pt_nodes; DROP TABLE pt_workspace; DROP TABLE pt_schema_migrations").unwrap();
     aw_datastore::DatastoreInstance::new(&conn, false).unwrap();
     let count: i64 = conn
         .query_row(

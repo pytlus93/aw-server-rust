@@ -10,6 +10,13 @@ use uuid::Uuid;
 use crate::DatastoreError;
 
 const MIGRATION: &str = include_str!("../../migrations/projects/0001_domain.sql");
+const MIGRATION_2: &str = include_str!("../../migrations/projects/0002_idempotency.sql");
+
+#[derive(Debug, Clone)]
+pub struct ProjectRetry {
+    pub key: String,
+    pub request_hash: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectSnapshot {
@@ -26,7 +33,6 @@ fn internal(error: impl std::fmt::Display) -> DatastoreError {
 /// Uses its own migration ledger without changing AW's user_version. Called
 /// before the worker begins serving commands, only on writable databases.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), DatastoreError> {
-    let checksum = format!("{:x}", Sha256::digest(MIGRATION.as_bytes()));
     conn.execute_batch("SAVEPOINT pt_migration")
         .map_err(internal)?;
     let result = (|| {
@@ -38,19 +44,82 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), DatastoreError> {
             .map_err(internal)?
             .collect::<rusqlite::Result<_>>()
             .map_err(internal)?;
-        if rows.is_empty() {
-            conn.execute_batch(MIGRATION).map_err(internal)?;
-            conn.execute(
-                "INSERT INTO pt_schema_migrations VALUES (1, ?1, ?2)",
-                params![Utc::now().timestamp_micros(), checksum],
-            )
-            .map_err(internal)?;
-        } else if rows != vec![(1, checksum)] {
-            return Err(internal("unsupported or modified project schema"));
+        let migrations = [MIGRATION, MIGRATION_2];
+        if rows.len() > migrations.len() {
+            return Err(internal("unsupported project schema"));
+        }
+        for (index, sql) in migrations.iter().enumerate() {
+            let version = index as i64 + 1;
+            let checksum = format!("{:x}", Sha256::digest(sql.as_bytes()));
+            if let Some(row) = rows.get(index) {
+                if row != &(version, checksum) {
+                    return Err(internal("unsupported or modified project schema"));
+                }
+            } else {
+                conn.execute_batch(sql).map_err(internal)?;
+                conn.execute(
+                    "INSERT INTO pt_schema_migrations VALUES (?1, ?2, ?3)",
+                    params![version, Utc::now().timestamp_micros(), checksum],
+                )
+                .map_err(internal)?;
+            }
         }
         Ok(())
     })();
     finish_savepoint(conn, "pt_migration", result)
+}
+
+pub(crate) fn replay(
+    conn: &Connection,
+    workspace_id: Uuid,
+    retry: &ProjectRetry,
+) -> Result<Option<ProjectSnapshot>, DatastoreError> {
+    if retry.key.is_empty()
+        || retry.key.len() > 128
+        || !retry.key.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Err(DatastoreError::InvalidProjectData(
+            "invalid idempotency key".into(),
+        ));
+    }
+    let record: Option<(String, String)> = conn.query_row(
+        "SELECT request_hash, response_json FROM pt_idempotency WHERE workspace_id=?1 AND operation_key=?2",
+        params![workspace_id.to_string(), retry.key], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(internal)?;
+    match record {
+        Some((hash, response)) if hash == retry.request_hash => {
+            Ok(Some(serde_json::from_str(&response).map_err(internal)?))
+        }
+        Some(_) => Err(DatastoreError::ProjectIdempotencyConflict),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn save_with_retry(
+    conn: &Connection,
+    candidate: ProjectSnapshot,
+    retry: ProjectRetry,
+) -> Result<ProjectSnapshot, DatastoreError> {
+    if let Some(response) = replay(conn, candidate.workspace_id, &retry)? {
+        return Ok(response);
+    }
+    conn.execute_batch("SAVEPOINT pt_retry").map_err(internal)?;
+    let result = (|| {
+        let saved = save(conn, candidate)?;
+        conn.execute(
+            "INSERT INTO pt_idempotency VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                saved.workspace_id.to_string(),
+                retry.key,
+                retry.request_hash,
+                serde_json::to_string(&saved).map_err(internal)?,
+                Utc::now().timestamp_micros()
+            ],
+        )
+        .map_err(internal)?;
+        Ok(saved)
+    })();
+    finish_savepoint(conn, "pt_retry", result)
 }
 
 fn finish_savepoint<T>(

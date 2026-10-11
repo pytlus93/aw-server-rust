@@ -5,7 +5,7 @@ unchanged. All new routes use the server's existing authentication, host and
 CORS protections. The Python server does not implement this capability.
 
 This is an initial API increment, not complete stage 1. Workspace metadata,
-timezone, rates/fees/currency, per-entity revisions, idempotency keys and UI are
+timezone, rates/fees/currency, per-entity revisions and UI are
 pending. Callers must not treat capabilities as implying those features.
 
 | Method/path below base | Contract |
@@ -44,18 +44,36 @@ return 500. Error bodies follow existing AW `HttpErrorJson`; structured domain
 error codes are future work. Names are limited to 1,024 UTF-8 bytes; CaseId and
 ActivityId to 256; snapshot adapter limits are 10,000 nodes/50,000 mappings.
 
-Lost-response retry handling is not yet idempotency-key based: re-read after an
-uncertain PUT and compare the stable ID/body before retrying with a new ETag.
-Blind retries with the old ETag return 412 and never create duplicate IDs. Cursor
+Mutations accept `Idempotency-Key` (1–128 visible ASCII characters). Use a random
+key per intended edit. Retry with the same key, method/path, typed JSON body and
+original If-Match. A committed retry returns its original snapshot/ETag even after
+later edits or restart; refresh current state afterwards. Different requests using
+the same key return 409. SHA-256 identity includes method/path, original ETag and
+canonical typed JSON. Invalid edits reserve no key. Response/edit/audit records
+commit atomically. Keys currently have indefinite local retention; no pruning or
+expiry is implemented. Do not put secrets in keys. Without a key, an old ETag is
+still 412 and never creates duplicate IDs. Cursor
 pages are not a frozen read snapshot; if the returned revision changes, restart
 pagination. No API operation rewrites watcher events or categories.
 
-GitHub workflow `Project tracking checks` runs domain/persistence and project HTTP
-tests plus existing API regressions on Windows, Linux and macOS. CI success is
-build/synthetic protocol evidence, not installed-host, Android or UI validation.
-No release binary or installer is produced by this workflow.
+GitHub Actions is unavailable and is not used. The custom workflow was removed;
+inherited workflows remain untouched and provide no validation evidence here.
+Run `./scripts/validate-project-tracking.ps1 -Offline` in PowerShell from this
+repository. Omit `-Offline` to fetch locked Cargo dependencies on a fresh machine.
+Requires Rust/Cargo, rustfmt, Clippy and the native linker (MSVC C++ tools and
+Windows SDK on Windows). The script fails on the first failed command, checks
+formatting, runs domain/datastore/HTTP regressions and scoped Clippy. Equivalent
+Cargo commands inside it can run directly on Linux/macOS, which remain unvalidated.
+It does not upload data or create an installer. Host, Android and UI evidence are
+separate from local synthetic tests.
 
-Local validation (Windows, Rust 1.99.0): five new HTTP tests and 22 existing API
+Local baseline validation (Windows, Rust 1.99.0): five initial HTTP tests and 22 existing API
 tests passed. Server/API Clippy passed with `--no-deps --lib --test projects_api
 -- -D warnings`. Without `--no-deps`, pre-existing duplicate lint attributes in
 aw-query block strict Clippy. Domain/datastore scoped Clippy also passed.
+
+Current validation after schema-2 retry support: the local script passed on
+Windows/Rust 1.99.0, with 105 tests passing and one existing legacy-import test
+ignored. Formatting and both scoped Clippy commands passed. Retry tests cover
+restart replay, key conflicts, concurrent identical requests, failed-edit key
+release, schema-1 upgrade and atomic rollback on retry-record insertion failure.

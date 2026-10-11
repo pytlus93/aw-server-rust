@@ -108,6 +108,7 @@ impl fmt::Debug for Datastore {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Response {
+    ProjectReplay(Option<crate::projects::ProjectSnapshot>),
     Projects(crate::projects::ProjectSnapshot),
     Export(File, Option<String>),
     ExportCsv(File),
@@ -124,6 +125,11 @@ pub enum Response {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Command {
+    ReplayProject(uuid::Uuid, crate::projects::ProjectRetry),
+    SaveProjectRetry(
+        crate::projects::ProjectSnapshot,
+        crate::projects::ProjectRetry,
+    ),
     GetProjects(uuid::Uuid),
     SaveProjects(crate::projects::ProjectSnapshot),
     Export(Option<String>, File),
@@ -353,7 +359,10 @@ impl DatastoreWorker {
                 };
                 let ack_after_commit = matches!(
                     request,
-                    Command::ForceCommit() | Command::Close() | Command::SaveProjects(_)
+                    Command::ForceCommit()
+                        | Command::Close()
+                        | Command::SaveProjects(_)
+                        | Command::SaveProjectRetry(_, _)
                 );
                 let response = self.handle_request(request, &mut ds, &tx);
                 if ack_after_commit {
@@ -420,6 +429,12 @@ impl DatastoreWorker {
         tx: &Transaction,
     ) -> Result<Response, DatastoreError> {
         match request {
+            Command::ReplayProject(workspace_id, retry) => {
+                crate::projects::replay(tx, workspace_id, &retry).map(Response::ProjectReplay)
+            }
+            Command::SaveProjectRetry(candidate, retry) => {
+                crate::projects::save_with_retry(tx, candidate, retry).map(Response::Projects)
+            }
             Command::GetProjects(workspace_id) => {
                 crate::projects::load(tx, workspace_id).map(Response::Projects)
             }
@@ -863,6 +878,32 @@ impl Datastore {
             Response::Projects(snapshot) => Ok(snapshot),
             _ => Err(DatastoreError::InternalError(
                 "Invalid project response".into(),
+            )),
+        }
+    }
+
+    pub fn replay_project(
+        &self,
+        workspace_id: uuid::Uuid,
+        retry: crate::projects::ProjectRetry,
+    ) -> Result<Option<crate::projects::ProjectSnapshot>, DatastoreError> {
+        match self.request(Command::ReplayProject(workspace_id, retry))? {
+            Response::ProjectReplay(snapshot) => Ok(snapshot),
+            _ => Err(DatastoreError::InternalError(
+                "Invalid project replay response".into(),
+            )),
+        }
+    }
+
+    pub fn save_project_retry(
+        &self,
+        candidate: crate::projects::ProjectSnapshot,
+        retry: crate::projects::ProjectRetry,
+    ) -> Result<crate::projects::ProjectSnapshot, DatastoreError> {
+        match self.request(Command::SaveProjectRetry(candidate, retry))? {
+            Response::Projects(snapshot) => Ok(snapshot),
+            _ => Err(DatastoreError::InternalError(
+                "Invalid project retry response".into(),
             )),
         }
     }

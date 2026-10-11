@@ -8,11 +8,68 @@ use rocket::response::{Responder, Response};
 use rocket::serde::json::Json;
 use rocket::{Request, State};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{HttpErrorJson, ServerState};
 
 pub struct Precondition(Option<String>);
+
+pub struct RetryHeader {
+    key: Option<String>,
+    operation: String,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for RetryHeader {
+    type Error = ();
+    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        Outcome::Success(Self {
+            key: request
+                .headers()
+                .get_one("Idempotency-Key")
+                .map(str::to_owned),
+            operation: format!("{} {}", request.method(), request.uri().path()),
+        })
+    }
+}
+
+fn prepare_retry(
+    state: &ServerState,
+    workspace: &str,
+    precondition: &Precondition,
+    header: RetryHeader,
+    body: Value,
+) -> Result<
+    (
+        Option<ProjectJson>,
+        Option<aw_datastore::projects::ProjectRetry>,
+    ),
+    HttpErrorJson,
+> {
+    // Preconditions remain required even on replay. Include the exact original
+    // precondition in identity; do not substitute today's workspace revision.
+    let etag = precondition
+        .0
+        .as_deref()
+        .ok_or_else(|| error(Status::PreconditionRequired, "If-Match is required"))?;
+    let Some(key) = header.key else {
+        return Ok((None, None));
+    };
+    if key.is_empty() || key.len() > 128 || !key.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(error(Status::BadRequest, "invalid Idempotency-Key"));
+    }
+    let request_hash = format!(
+        "{:x}",
+        Sha256::digest(json!([header.operation, etag, body]).to_string().as_bytes())
+    );
+    let retry = aw_datastore::projects::ProjectRetry { key, request_hash };
+    let replay = state
+        .datastore
+        .replay_project(id(workspace)?, retry.clone())
+        .map_err(HttpErrorJson::from)?;
+    Ok((replay.map(reply), Some(retry)))
+}
 
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for Precondition {
@@ -77,7 +134,11 @@ fn reply(snapshot: ProjectSnapshot) -> ProjectJson {
     }
 }
 
-fn save(state: &ServerState, snapshot: ProjectSnapshot) -> Result<ProjectJson, HttpErrorJson> {
+fn save(
+    state: &ServerState,
+    snapshot: ProjectSnapshot,
+    retry: Option<aw_datastore::projects::ProjectRetry>,
+) -> Result<ProjectJson, HttpErrorJson> {
     // Initial bounded snapshot adapter, not an unbounded public overwrite API.
     if snapshot.nodes.len() > 10_000 || snapshot.mappings.len() > 50_000 {
         return Err(error(
@@ -85,18 +146,18 @@ fn save(state: &ServerState, snapshot: ProjectSnapshot) -> Result<ProjectJson, H
             "workspace resource limit exceeded",
         ));
     }
-    state
-        .datastore
-        .save_projects(snapshot)
-        .map(reply)
-        .map_err(Into::into)
+    let saved = match retry {
+        Some(retry) => state.datastore.save_project_retry(snapshot, retry),
+        None => state.datastore.save_projects(snapshot),
+    };
+    saved.map(reply).map_err(Into::into)
 }
 
 #[get("/capabilities")]
 pub fn capabilities() -> Json<Value> {
-    Json(json!({"api_version": 1, "schema_version": 1,
+    Json(json!({"api_version": 1, "schema_version": 2,
         "features": ["nodes", "archive", "dated_activity_ids", "resolved_policy"],
-        "concurrency": "workspace_etag", "idempotency_keys": false,
+        "concurrency": "workspace_etag", "idempotency_keys": true,
         "manual_entries": false, "export_snapshots": false}))
 }
 
@@ -161,8 +222,20 @@ pub fn put_node(
     workspace: &str,
     node_id: &str,
     precondition: Precondition,
+    retry_header: RetryHeader,
     node: Json<Node>,
 ) -> Result<ProjectJson, HttpErrorJson> {
+    let _guard = state.project_write_lock.lock().map_err(|_| {
+        error(
+            Status::InternalServerError,
+            "project mutation lock unavailable",
+        )
+    })?;
+    let (replay, retry) =
+        prepare_retry(state, workspace, &precondition, retry_header, json!(&*node))?;
+    if let Some(response) = replay {
+        return Ok(response);
+    }
     let mut snapshot = load(state, workspace)?;
     precondition.check(snapshot.revision)?;
     let node = node.into_inner();
@@ -179,7 +252,7 @@ pub fn put_node(
         Some(old) => *old = node,
         None => snapshot.nodes.push(node),
     }
-    save(state, snapshot)
+    save(state, snapshot, retry)
 }
 
 #[get("/workspaces/<workspace>/nodes/<node_id>/resolved-policy?<work_date>")]
@@ -232,8 +305,25 @@ pub fn put_mapping(
     workspace: &str,
     mapping_id: &str,
     precondition: Precondition,
+    retry_header: RetryHeader,
     mapping: Json<ActivityIdMapping>,
 ) -> Result<ProjectJson, HttpErrorJson> {
+    let _guard = state.project_write_lock.lock().map_err(|_| {
+        error(
+            Status::InternalServerError,
+            "project mutation lock unavailable",
+        )
+    })?;
+    let (replay, retry) = prepare_retry(
+        state,
+        workspace,
+        &precondition,
+        retry_header,
+        json!(&*mapping),
+    )?;
+    if let Some(response) = replay {
+        return Ok(response);
+    }
     let mut snapshot = load(state, workspace)?;
     precondition.check(snapshot.revision)?;
     let mapping = mapping.into_inner();
@@ -251,7 +341,7 @@ pub fn put_mapping(
         Some(old) => *old = mapping,
         None => snapshot.mappings.push(mapping),
     }
-    save(state, snapshot)
+    save(state, snapshot, retry)
 }
 
 #[delete("/workspaces/<workspace>/activity-id-mappings/<mapping_id>")]
@@ -260,7 +350,19 @@ pub fn delete_mapping(
     workspace: &str,
     mapping_id: &str,
     precondition: Precondition,
+    retry_header: RetryHeader,
 ) -> Result<ProjectJson, HttpErrorJson> {
+    let _guard = state.project_write_lock.lock().map_err(|_| {
+        error(
+            Status::InternalServerError,
+            "project mutation lock unavailable",
+        )
+    })?;
+    let (replay, retry) =
+        prepare_retry(state, workspace, &precondition, retry_header, Value::Null)?;
+    if let Some(response) = replay {
+        return Ok(response);
+    }
     let mut snapshot = load(state, workspace)?;
     precondition.check(snapshot.revision)?;
     let mapping_id = id(mapping_id)?;
@@ -268,5 +370,5 @@ pub fn delete_mapping(
         return Err(error(Status::NotFound, "mapping does not exist"));
     }
     snapshot.mappings.retain(|m| m.id != mapping_id);
-    save(state, snapshot)
+    save(state, snapshot, retry)
 }

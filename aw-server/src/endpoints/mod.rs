@@ -42,6 +42,9 @@ impl AssetResolver {
 // needed here — wrapping it in one would serialize all HTTP requests, letting
 // a slow query block every heartbeat.
 pub struct ServerState {
+    /// Serialize only project HTTP read/validate/write sequences, including
+    /// replay lookup. Watcher writes do not acquire this module-owned lock.
+    pub project_write_lock: std::sync::Mutex<()>,
     pub datastore: Datastore,
     pub asset_resolver: AssetResolver,
     pub device_id: String,
@@ -60,6 +63,7 @@ impl ServerState {
     /// Build a state with the default (enabled) query cache.
     pub fn new(datastore: Datastore, asset_resolver: AssetResolver, device_id: String) -> Self {
         Self {
+            project_write_lock: std::sync::Mutex::new(()),
             datastore,
             asset_resolver,
             device_id,

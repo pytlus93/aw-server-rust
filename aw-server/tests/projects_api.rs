@@ -65,7 +65,7 @@ fn node_crud_requires_workspace_etag_and_archive_filters_descendants() {
     assert_eq!(capability.status(), Status::Ok);
     assert_eq!(
         capability.into_json::<Value>().unwrap()["idempotency_keys"],
-        false
+        true
     );
     assert_eq!(
         put(&client, &format!("nodes/{ROOT}"), None, node(ROOT, None)).0,
@@ -231,4 +231,40 @@ fn browser_watcher_origin_cannot_read_project_data() {
         .headers()
         .get_one("Access-Control-Allow-Origin")
         .is_none());
+}
+
+#[test]
+fn uncertain_http_write_can_replay_original_response_without_duplicate_revision() {
+    let client = client(AWConfig::default());
+    let send = |name: &str, key: &str| {
+        let mut body = node(ROOT, None);
+        body["name"] = json!(name);
+        client
+            .put(path(&format!("nodes/{ROOT}")))
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .header(ContentType::JSON)
+            .header(Header::new("If-Match", "\"0\""))
+            .header(Header::new("Idempotency-Key", key.to_owned()))
+            .body(body.to_string())
+            .dispatch()
+    };
+    let first = send("Synthetic case", "synthetic-create");
+    assert_eq!(first.status(), Status::Ok);
+    let original = first.into_json::<Value>().unwrap();
+    let replay = send("Synthetic case", "synthetic-create");
+    assert_eq!(replay.status(), Status::Ok);
+    assert_eq!(replay.headers().get_one("ETag"), Some("\"1\""));
+    assert_eq!(replay.into_json::<Value>().unwrap(), original);
+    assert_eq!(
+        send("Different case", "synthetic-create").status(),
+        Status::Conflict
+    );
+    assert_eq!(
+        send("Synthetic case", "new-key").status(),
+        Status::PreconditionFailed
+    );
+    assert_eq!(
+        send("Synthetic case", "bad key").status(),
+        Status::BadRequest
+    );
 }
