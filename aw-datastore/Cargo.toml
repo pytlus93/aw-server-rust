@@ -17,6 +17,9 @@ encryption-vendored = ["rusqlite/bundled-sqlcipher-vendored-openssl", "dep:zeroi
 legacy_import_tests = []
 
 [dependencies]
+aw-projects = { path = "../aw-projects" }
+sha2 = "0.10"
+uuid = { version = "1", features = ["serde", "v4"] }
 dirs = "6"
 serde = "1.0"
 serde_json = "1.0"

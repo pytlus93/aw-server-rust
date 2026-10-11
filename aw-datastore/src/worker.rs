@@ -108,6 +108,7 @@ impl fmt::Debug for Datastore {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Response {
+    Projects(crate::projects::ProjectSnapshot),
     Export(File, Option<String>),
     ExportCsv(File),
     Empty(),
@@ -123,6 +124,8 @@ pub enum Response {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Command {
+    GetProjects(uuid::Uuid),
+    SaveProjects(crate::projects::ProjectSnapshot),
     Export(Option<String>, File),
     ExportCsv(
         String,
@@ -255,6 +258,8 @@ impl DatastoreWorker {
         // own (ActivityWatch/aw-server-rust#693). In-memory databases ignore
         // the request (journal_mode stays "memory").
         if !read_only {
+            conn.pragma_update(None, "foreign_keys", true)
+                .expect("Failed to enable foreign keys");
             let journal_mode: String = conn
                 .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
                 .expect("Failed to query journal_mode");
@@ -327,7 +332,7 @@ impl DatastoreWorker {
 
             self.uncommitted_events = 0;
             self.commit = false;
-            // ForceCommit and Close promise the caller that their data is
+            // ForceCommit, Close and project saves promise that their data is
             // committed, so their acks are held back until the transaction
             // below has actually committed. Acking first (as before) let a
             // caller reopen the database and read a pre-commit snapshot —
@@ -346,10 +351,13 @@ impl DatastoreWorker {
                         break;
                     }
                 };
-                let ack_after_commit = matches!(request, Command::ForceCommit() | Command::Close());
+                let ack_after_commit = matches!(
+                    request,
+                    Command::ForceCommit() | Command::Close() | Command::SaveProjects(_)
+                );
                 let response = self.handle_request(request, &mut ds, &tx);
                 if ack_after_commit {
-                    // Both commands force a commit, so the loop ends here.
+                    // End the batch and acknowledge only after durable commit.
                     deferred_ack = Some((response_sender, response));
                     break;
                 }
@@ -412,6 +420,12 @@ impl DatastoreWorker {
         tx: &Transaction,
     ) -> Result<Response, DatastoreError> {
         match request {
+            Command::GetProjects(workspace_id) => {
+                crate::projects::load(tx, workspace_id).map(Response::Projects)
+            }
+            Command::SaveProjects(candidate) => {
+                crate::projects::save(tx, candidate).map(Response::Projects)
+            }
             Command::Export(bucket_id, mut file) => {
                 let mut writer = BufWriter::new(&mut file);
                 let name = ds.write_export(tx, bucket_id.as_deref(), &mut writer)?;
@@ -839,6 +853,30 @@ impl Datastore {
     pub fn force_commit(&self) -> Result<(), DatastoreError> {
         let cmd = Command::ForceCommit();
         _unwrap_empty_response(self.request(cmd)?)
+    }
+
+    pub fn get_projects(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<crate::projects::ProjectSnapshot, DatastoreError> {
+        match self.request(Command::GetProjects(workspace_id))? {
+            Response::Projects(snapshot) => Ok(snapshot),
+            _ => Err(DatastoreError::InternalError(
+                "Invalid project response".into(),
+            )),
+        }
+    }
+
+    pub fn save_projects(
+        &self,
+        candidate: crate::projects::ProjectSnapshot,
+    ) -> Result<crate::projects::ProjectSnapshot, DatastoreError> {
+        match self.request(Command::SaveProjects(candidate))? {
+            Response::Projects(snapshot) => Ok(snapshot),
+            _ => Err(DatastoreError::InternalError(
+                "Invalid project response".into(),
+            )),
+        }
     }
 
     pub fn get_key_values(&self, pattern: &str) -> Result<HashMap<String, String>, DatastoreError> {

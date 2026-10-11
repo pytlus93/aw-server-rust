@@ -305,6 +305,13 @@ use aw_datastore::DatastoreError;
 impl From<DatastoreError> for HttpErrorJson {
     fn from(val: DatastoreError) -> Self {
         match val {
+            DatastoreError::ProjectConflict { expected, actual } => HttpErrorJson::new(
+                Status::PreconditionFailed,
+                format!("Project revision conflict: expected {expected}, actual {actual}"),
+            ),
+            DatastoreError::InvalidProjectData(message) => {
+                HttpErrorJson::new(Status::UnprocessableEntity, message)
+            }
             DatastoreError::NoSuchBucket(bucket_id) => HttpErrorJson::new(
                 Status::NotFound,
                 format!("The requested bucket '{bucket_id}' does not exist"),

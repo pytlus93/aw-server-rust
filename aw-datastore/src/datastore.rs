@@ -496,6 +496,7 @@ impl DatastoreInstance {
 
         if migrate_enabled {
             first_init = _create_tables(conn, db_version);
+            crate::projects::migrate(conn)?;
             // Queries pick index hints from this, so it must describe the
             // migrated file, not the version it had before this open.
             db_version = _get_db_version(conn);

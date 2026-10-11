@@ -224,6 +224,7 @@ name = "aw-datastore"
 version = "0.1.0"
 dependencies = [
  "aw-models",
+ "aw-projects",
  "aw-transform",
  "chrono",
  "criterion",
@@ -234,7 +235,9 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "uuid",
  "zeroize",
 ]
 

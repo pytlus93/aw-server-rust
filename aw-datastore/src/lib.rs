@@ -21,6 +21,7 @@ mod datastore;
 mod export;
 mod legacy_import;
 mod privacy_filter;
+pub mod projects;
 mod worker;
 
 pub use self::datastore::DatastoreInstance;
@@ -57,6 +58,8 @@ impl fmt::Debug for DatastoreMethod {
 /* TODO: Implement this as a proper error */
 #[derive(Debug, Clone)]
 pub enum DatastoreError {
+    ProjectConflict { expected: i64, actual: i64 },
+    InvalidProjectData(String),
     NoSuchBucket(String),
     BucketAlreadyExists(String),
     NoSuchKey(String),
