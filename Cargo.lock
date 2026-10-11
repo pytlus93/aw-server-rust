@@ -250,6 +250,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aw-projects"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "uuid",
+]
+
+[[package]]
 name = "aw-query"
 version = "0.1.0"
 dependencies = [
