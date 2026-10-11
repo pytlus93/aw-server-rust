@@ -11,6 +11,7 @@ use crate::DatastoreError;
 
 const MIGRATION: &str = include_str!("../../migrations/projects/0001_domain.sql");
 const MIGRATION_2: &str = include_str!("../../migrations/projects/0002_idempotency.sql");
+const MIGRATION_3: &str = include_str!("../../migrations/projects/0003_workspace_settings.sql");
 
 #[derive(Debug, Clone)]
 pub struct ProjectRetry {
@@ -22,6 +23,8 @@ pub struct ProjectRetry {
 pub struct ProjectSnapshot {
     pub workspace_id: Uuid,
     pub revision: i64,
+    #[serde(default)]
+    pub settings: aw_projects::WorkspaceSettings,
     pub nodes: Vec<Node>,
     pub mappings: Vec<ActivityIdMapping>,
 }
@@ -44,7 +47,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), DatastoreError> {
             .map_err(internal)?
             .collect::<rusqlite::Result<_>>()
             .map_err(internal)?;
-        let migrations = [MIGRATION, MIGRATION_2];
+        let migrations = [MIGRATION, MIGRATION_2, MIGRATION_3];
         if rows.len() > migrations.len() {
             return Err(internal("unsupported project schema"));
         }
@@ -173,9 +176,22 @@ pub(crate) fn load(
         .into_iter()
         .map(|json| serde_json::from_str(&json).map_err(internal))
         .collect::<Result<Vec<ActivityIdMapping>, _>>()?;
+    let settings: Option<String> = conn
+        .query_row(
+            "SELECT settings_json FROM pt_workspace WHERE id=?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    let settings = settings
+        .map(|json| serde_json::from_str(&json).map_err(internal))
+        .transpose()?
+        .unwrap_or_default();
     Ok(ProjectSnapshot {
         workspace_id,
         revision,
+        settings,
         nodes,
         mappings,
     })
@@ -188,6 +204,10 @@ pub(crate) fn save(
     conn: &Connection,
     mut candidate: ProjectSnapshot,
 ) -> Result<ProjectSnapshot, DatastoreError> {
+    candidate
+        .settings
+        .validate()
+        .map_err(|e| DatastoreError::InvalidProjectData(e.into()))?;
     let tree = Hierarchy::new(candidate.nodes.clone())
         .map_err(|e| DatastoreError::InvalidProjectData(format!("{e:?}")))?;
     tree.validate_mappings(&candidate.mappings)
@@ -231,6 +251,14 @@ pub(crate) fn save(
         let workspace = candidate.workspace_id.to_string();
         let now = Utc::now().timestamp_micros();
         conn.execute("INSERT INTO pt_workspace (id, revision, created_at_us, updated_at_us) VALUES (?1, ?2, ?3, ?3) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, updated_at_us=excluded.updated_at_us", params![workspace, candidate.revision, now]).map_err(internal)?;
+        conn.execute(
+            "UPDATE pt_workspace SET settings_json=?1 WHERE id=?2",
+            params![
+                serde_json::to_string(&candidate.settings).map_err(internal)?,
+                workspace
+            ],
+        )
+        .map_err(internal)?;
         // Delete mappings first; parent references are deferred until commit.
         conn.execute(
             "DELETE FROM pt_activity_id_mappings WHERE workspace_id=?1",

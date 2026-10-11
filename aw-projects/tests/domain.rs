@@ -9,6 +9,8 @@ fn node(id: u128, parent: Option<u128>, kind: NodeKind) -> Node {
         parent_id: parent.map(Uuid::from_u128),
         kind,
         name: format!("Synthetic {id}"),
+        description: String::new(),
+        billing_terms: Default::default(),
         case_id: None,
         archived: false,
         billing: BillingMode::Inherited,
@@ -18,6 +20,39 @@ fn node(id: u128, parent: Option<u128>, kind: NodeKind) -> Node {
 
 fn date(month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, month, day).unwrap()
+}
+
+#[test]
+fn exact_terms_inherit_and_invalid_amounts_are_rejected() {
+    let mut root = node(1, None, NodeKind::Project);
+    root.billing = BillingMode::Tm;
+    root.billing_terms = BillingTerms {
+        currency: Some("CZK".into()),
+        hourly_rate: Some("123456789012345678.123456".into()),
+        fixed_fee: None,
+    };
+    let child = node(2, Some(1), NodeKind::Task);
+    let tree = Hierarchy::new([root.clone(), child.clone()]).unwrap();
+    assert_eq!(
+        tree.resolve(child.id).unwrap().billing_terms,
+        root.billing_terms
+    );
+    for invalid in ["1e3", "-1", "NaN", "1.1234567", "1.", ".5"] {
+        root.billing_terms.hourly_rate = Some(invalid.into());
+        assert!(Hierarchy::new([root.clone(), child.clone()]).is_err());
+    }
+    root.billing = BillingMode::Inherited;
+    root.billing_terms.hourly_rate = Some("1".into());
+    assert!(Hierarchy::new([root]).is_err());
+}
+
+#[test]
+fn workspace_requires_known_timezone() {
+    let mut settings = WorkspaceSettings::default();
+    settings.reporting_timezone = "Europe/Prague".into();
+    assert!(settings.validate().is_ok());
+    settings.reporting_timezone = "Mars/City".into();
+    assert!(settings.validate().is_err());
 }
 
 #[test]

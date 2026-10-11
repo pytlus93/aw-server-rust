@@ -8,12 +8,15 @@ fn snapshot() -> ProjectSnapshot {
     ProjectSnapshot {
         workspace_id,
         revision: 0,
+        settings: Default::default(),
         nodes: vec![Node {
             id: Uuid::from_u128(1),
             workspace_id,
             parent_id: None,
             kind: NodeKind::Project,
             name: "Synthetic case".into(),
+            description: String::new(),
+            billing_terms: Default::default(),
             case_id: Some("CS0000000".into()),
             archived: false,
             billing: BillingMode::Fixed,
@@ -28,7 +31,12 @@ fn acknowledged_save_is_visible_on_separate_connection_and_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aw.db");
     let ds = Datastore::new(path.to_str().unwrap().into(), false);
-    let saved = ds.save_projects(snapshot()).unwrap();
+    let mut initial = snapshot();
+    initial.settings.reporting_timezone = "Europe/Prague".into();
+    initial.nodes[0].description = "Synthetic milestone".into();
+    initial.nodes[0].billing_terms.currency = Some("CZK".into());
+    initial.nodes[0].billing_terms.fixed_fee = Some("25000.123456".into());
+    let saved = ds.save_projects(initial).unwrap();
     assert_eq!(saved.revision, 1);
     // Separate WAL reader proves the response comes after commit, before close.
     let conn = Connection::open(&path).unwrap();
@@ -124,9 +132,9 @@ fn migration_is_idempotent_and_preserves_aw_schema_version() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     conn.execute(
-        "UPDATE pt_schema_migrations SET version=3 WHERE version=2",
+        "UPDATE pt_schema_migrations SET version=4 WHERE version=3",
         [],
     )
     .unwrap();

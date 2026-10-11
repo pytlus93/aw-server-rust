@@ -8,6 +8,7 @@ fn snapshot() -> ProjectSnapshot {
     ProjectSnapshot {
         workspace_id: Uuid::from_u128(100),
         revision: 0,
+        settings: Default::default(),
         nodes: vec![],
         mappings: vec![],
     }
@@ -85,7 +86,7 @@ fn schema_one_upgrades_and_retry_insert_failure_rolls_back_entire_edit() {
     let conn = rusqlite::Connection::open(&path).unwrap();
     aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
     conn.execute_batch(
-        "DROP TABLE pt_idempotency; DELETE FROM pt_schema_migrations WHERE version=2;",
+        "ALTER TABLE pt_workspace DROP COLUMN settings_json; DROP TABLE pt_idempotency; DELETE FROM pt_schema_migrations WHERE version>=2;",
     )
     .unwrap();
     aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
@@ -94,7 +95,7 @@ fn schema_one_upgrades_and_retry_insert_failure_rolls_back_entire_edit() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     conn.execute_batch("CREATE TRIGGER fail_retry BEFORE INSERT ON pt_idempotency BEGIN SELECT RAISE(ABORT, 'synthetic storage failure'); END;").unwrap();
     drop(conn);
     let ds = Datastore::new(path.to_str().unwrap().into(), false);

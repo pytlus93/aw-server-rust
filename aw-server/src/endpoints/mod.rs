@@ -204,6 +204,8 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             "/api/0/project-tracking/v1",
             routes![
                 projects::capabilities,
+                projects::workspace,
+                projects::put_settings,
                 projects::nodes,
                 projects::tree,
                 projects::put_node,

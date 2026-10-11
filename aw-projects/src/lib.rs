@@ -9,6 +9,72 @@ use uuid::Uuid;
 
 pub const MAX_DEPTH: usize = 128;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSettings {
+    pub name: String,
+    pub reporting_timezone: String,
+}
+
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        Self {
+            name: "Projects".into(),
+            reporting_timezone: "UTC".into(),
+        }
+    }
+}
+
+impl WorkspaceSettings {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.name.trim().is_empty() || self.name.len() > 256 {
+            return Err("invalid workspace name");
+        }
+        self.reporting_timezone
+            .parse::<chrono_tz::Tz>()
+            .map_err(|_| "unknown IANA timezone")?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BillingTerms {
+    pub currency: Option<String>,
+    pub hourly_rate: Option<String>,
+    pub fixed_fee: Option<String>,
+}
+
+fn valid_decimal(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let whole = parts.next().unwrap_or("");
+    let fraction = parts.next();
+    !whole.is_empty()
+        && whole.len() <= 18
+        && whole.bytes().all(|b| b.is_ascii_digit())
+        && fraction
+            .is_none_or(|f| !f.is_empty() && f.len() <= 6 && f.bytes().all(|b| b.is_ascii_digit()))
+        && parts.next().is_none()
+}
+
+impl BillingTerms {
+    pub fn validate(&self, mode: BillingMode) -> bool {
+        let empty = self == &Self::default();
+        if matches!(mode, BillingMode::Inherited | BillingMode::NonBillable) {
+            return empty;
+        }
+        let amount = match mode {
+            BillingMode::Tm if self.fixed_fee.is_none() => &self.hourly_rate,
+            BillingMode::Fixed if self.hourly_rate.is_none() => &self.fixed_fee,
+            _ => return false,
+        };
+        self.currency
+            .as_ref()
+            .is_none_or(|c| c.len() == 3 && c.bytes().all(|b| b.is_ascii_uppercase()))
+            && amount
+                .as_ref()
+                .is_none_or(|v| self.currency.is_some() && valid_decimal(v))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
@@ -43,9 +109,13 @@ pub struct Node {
     pub parent_id: Option<Uuid>,
     pub kind: NodeKind,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
     pub case_id: Option<String>,
     pub archived: bool,
     pub billing: BillingMode,
+    #[serde(default)]
+    pub billing_terms: BillingTerms,
     pub reporting: ReportingPolicy,
 }
 
@@ -68,6 +138,8 @@ pub enum DomainError {
     CrossWorkspace(Uuid),
     InvalidParent(Uuid),
     EmptyName(Uuid),
+    InvalidBillingTerms(Uuid),
+    InvalidMetadata(Uuid),
     InvalidReportingTarget(Uuid),
     InvalidMapping(Uuid),
     OverlappingMappings(Uuid, Uuid),
@@ -84,6 +156,7 @@ pub struct Hierarchy {
 pub struct ResolvedPolicy {
     pub billing: BillingMode,
     pub billing_owner_id: Option<Uuid>,
+    pub billing_terms: BillingTerms,
     pub reporting_target_id: Uuid,
     pub reporting_owner_id: Option<Uuid>,
     pub effectively_archived: bool,
@@ -102,6 +175,15 @@ impl Hierarchy {
         for node in tree.nodes.values() {
             if node.name.trim().is_empty() {
                 return Err(DomainError::EmptyName(node.id));
+            }
+            if node.name.len() > 1024
+                || node.description.len() > 16_384
+                || node.case_id.as_ref().is_some_and(|id| id.len() > 256)
+            {
+                return Err(DomainError::InvalidMetadata(node.id));
+            }
+            if !node.billing_terms.validate(node.billing) {
+                return Err(DomainError::InvalidBillingTerms(node.id));
             }
             let path = tree.path(node.id)?;
             if node.parent_id.is_none() && node.kind != NodeKind::Project {
@@ -159,6 +241,8 @@ impl Hierarchy {
         Ok(ResolvedPolicy {
             billing: billing_owner.map_or(BillingMode::NonBillable, |n| n.billing),
             billing_owner_id: billing_owner.map(|n| n.id),
+            billing_terms: billing_owner
+                .map_or_else(BillingTerms::default, |n| n.billing_terms.clone()),
             reporting_target_id: target,
             reporting_owner_id: reporting_owner.map(|n| n.id),
             effectively_archived: path.iter().any(|n| n.archived),

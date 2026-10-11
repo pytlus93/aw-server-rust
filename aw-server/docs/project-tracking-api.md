@@ -36,7 +36,26 @@ is non-billable with root reporting. Hierarchy depth limit is 128.
 Mapping body: `id`, `owner_node_id`, `valid_from`, nullable exclusive `valid_until`,
 and nonempty `activity_id`. Date ranges cannot overlap on the same owner.
 Missing mappings do not fall back to CaseId. Fixed mode does not calculate hourly
-charges. These DTOs currently contain no monetary terms.
+charges.
+
+Schema 3 adds `GET /workspace`, which returns the stable local workspace
+`a8e34d04-6b7d-4c73-a15e-26eb24204ef1` (reading does not create it), and
+`PUT /workspaces/{uuid}/settings` with the same ETag/retry contract. Settings
+contain a nonempty `name` (256 UTF-8 bytes maximum) and an IANA
+`reporting_timezone`, defaulting to `Projects` and `UTC`. No browser timezone
+is silently substituted. Existing workspaces and historical snapshots receive
+these defaults during migration/deserialization.
+
+Nodes add `description` (default empty, maximum 16,384 UTF-8 bytes) and
+`billing_terms` (default all null): `currency`, `hourly_rate`, `fixed_fee`.
+Amounts are decimal **strings**, never binary floats: 1–18 whole digits and
+optionally 1–6 fractional digits, nonnegative, with no exponent or grouping.
+Currency is a three-letter uppercase code; a provided amount requires currency.
+T&M permits only hourly rate, fixed permits only fixed fee; inherited and
+non-billable require null terms. Effective billing inherits mode and terms
+together from the nearest explicit owner. These are configured terms, not an
+invoice or exchange-rate calculation. Description and terms remain local
+project metadata; they are not copied into watcher events.
 
 Malformed UUID/date/query limits return 400; malformed JSON follows Rocket's
 JSON responder behavior. Invalid hierarchy/policy/mapping is 422. Storage failures
@@ -77,3 +96,9 @@ Windows/Rust 1.99.0, with 105 tests passing and one existing legacy-import test
 ignored. Formatting and both scoped Clippy commands passed. Retry tests cover
 restart replay, key conflicts, concurrent identical requests, failed-edit key
 release, schema-1 upgrade and atomic rollback on retry-record insertion failure.
+
+Schema-3 validation: 108 tests passed, one legacy test ignored, formatting and
+scoped Clippy passed on Windows/Rust 1.99.0. Added exact-term inheritance,
+invalid decimals/timezones, settings HTTP validation and schema-1-to-3 migration.
+The persistence regression verifies settings, descriptions and fixed terms
+survive restart along with revision history.

@@ -14,6 +14,50 @@ const CHILD: &str = "00000000-0000-0000-0000-000000000002";
 const MAPPING: &str = "00000000-0000-0000-0000-00000000000a";
 const BASE: &str = "/api/0/project-tracking/v1";
 
+#[test]
+fn settings_and_exact_terms_are_validated_and_saved() {
+    let client = client(AWConfig::default());
+    let response = client
+        .get(format!("{BASE}/workspace"))
+        .header(Header::new("Host", "127.0.0.1:5600"))
+        .dispatch();
+    assert_eq!(response.status(), Status::Ok);
+    assert_eq!(
+        response.into_json::<Value>().unwrap()["settings"]["reporting_timezone"],
+        "UTC"
+    );
+    let settings = json!({"name":"Synthetic projects", "reporting_timezone":"Europe/Prague"});
+    assert_eq!(
+        put(&client, "settings", Some(0), settings.clone()).0,
+        Status::Ok
+    );
+    assert_eq!(
+        put(
+            &client,
+            "settings",
+            Some(1),
+            json!({"name":"Synthetic", "reporting_timezone":"bad"})
+        )
+        .0,
+        Status::UnprocessableEntity
+    );
+    let mut root = node(ROOT, None);
+    root["billing"] = json!("tm");
+    root["billing_terms"] =
+        json!({"currency":"CZK", "hourly_rate":"1500.123456", "fixed_fee":null});
+    let (_, _, saved) = put(&client, &format!("nodes/{ROOT}"), Some(1), root.clone());
+    assert_eq!(saved["settings"], settings);
+    assert_eq!(
+        saved["nodes"][0]["billing_terms"]["hourly_rate"],
+        "1500.123456"
+    );
+    root["billing_terms"]["hourly_rate"] = json!("1e3");
+    assert_eq!(
+        put(&client, &format!("nodes/{ROOT}"), Some(2), root).0,
+        Status::UnprocessableEntity
+    );
+}
+
 fn client(config: AWConfig) -> Client {
     let state = ServerState::new(
         aw_datastore::Datastore::new_in_memory(false),

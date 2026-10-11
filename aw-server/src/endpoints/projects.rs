@@ -1,6 +1,6 @@
 //! Additive project API; no writes to captured events or category settings.
 use aw_datastore::projects::ProjectSnapshot;
-use aw_projects::{ActivityIdMapping, Hierarchy, Node};
+use aw_projects::{ActivityIdMapping, Hierarchy, Node, WorkspaceSettings};
 use chrono::NaiveDate;
 use rocket::http::{Header, Status};
 use rocket::request::{FromRequest, Outcome};
@@ -155,10 +155,51 @@ fn save(
 
 #[get("/capabilities")]
 pub fn capabilities() -> Json<Value> {
-    Json(json!({"api_version": 1, "schema_version": 2,
-        "features": ["nodes", "archive", "dated_activity_ids", "resolved_policy"],
+    Json(json!({"api_version": 1, "schema_version": 3,
+        "features": ["nodes", "archive", "dated_activity_ids", "resolved_policy", "workspace_settings", "billing_terms"],
         "concurrency": "workspace_etag", "idempotency_keys": true,
         "manual_entries": false, "export_snapshots": false}))
+}
+
+/// Stable local workspace for the single-user AW interface. Reading it does not
+/// initialize storage; its first explicit edit creates revision one.
+#[get("/workspace")]
+pub fn workspace(state: &State<ServerState>) -> Result<ProjectJson, HttpErrorJson> {
+    Ok(reply(load(state, "a8e34d04-6b7d-4c73-a15e-26eb24204ef1")?))
+}
+
+#[put(
+    "/workspaces/<workspace>/settings",
+    format = "json",
+    data = "<settings>"
+)]
+pub fn put_settings(
+    state: &State<ServerState>,
+    workspace: &str,
+    precondition: Precondition,
+    retry_header: RetryHeader,
+    settings: Json<WorkspaceSettings>,
+) -> Result<ProjectJson, HttpErrorJson> {
+    let _guard = state.project_write_lock.lock().map_err(|_| {
+        error(
+            Status::InternalServerError,
+            "project mutation lock unavailable",
+        )
+    })?;
+    let (replay, retry) = prepare_retry(
+        state,
+        workspace,
+        &precondition,
+        retry_header,
+        json!(&*settings),
+    )?;
+    if let Some(response) = replay {
+        return Ok(response);
+    }
+    let mut snapshot = load(state, workspace)?;
+    precondition.check(snapshot.revision)?;
+    snapshot.settings = settings.into_inner();
+    save(state, snapshot, retry)
 }
 
 #[get("/workspaces/<workspace>/nodes?<q>&<include_archived>&<after>&<limit>")]
