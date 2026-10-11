@@ -79,6 +79,7 @@ mod export;
 mod extension_cors;
 mod hostcheck;
 mod import;
+mod projects;
 mod query;
 pub mod query_cache;
 mod settings;
@@ -195,6 +196,19 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
             ],
         )
         .mount("/api/0/info", routes![server_info])
+        .mount(
+            "/api/0/project-tracking/v1",
+            routes![
+                projects::capabilities,
+                projects::nodes,
+                projects::tree,
+                projects::put_node,
+                projects::resolved,
+                projects::mappings,
+                projects::put_mapping,
+                projects::delete_mapping,
+            ],
+        )
         .mount(
             "/api/0/buckets",
             routes![

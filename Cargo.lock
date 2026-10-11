@@ -286,6 +286,7 @@ dependencies = [
  "aw-client-rust",
  "aw-datastore",
  "aw-models",
+ "aw-projects",
  "aw-query",
  "aw-transform",
  "chrono",

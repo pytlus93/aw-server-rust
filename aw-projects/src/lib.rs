@@ -80,7 +80,7 @@ pub struct Hierarchy {
     nodes: HashMap<Uuid, Node>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedPolicy {
     pub billing: BillingMode,
     pub billing_owner_id: Option<Uuid>,
