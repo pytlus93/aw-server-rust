@@ -10,3 +10,6 @@ NDK
 *.sqlite*
 *.db
 *.db-journal
+
+# Local validation databases, configs and logs (never publish activity data).
+/local/
