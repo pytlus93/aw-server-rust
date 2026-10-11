@@ -14,6 +14,65 @@ const CHILD: &str = "00000000-0000-0000-0000-000000000002";
 const MAPPING: &str = "00000000-0000-0000-0000-00000000000a";
 const BASE: &str = "/api/0/project-tracking/v1";
 
+fn entry(entry_id: &str, assigned: &str, start: &str, end: &str) -> Value {
+    json!({"id":entry_id,"node_id":assigned,"description":"Synthetic booking","intervals":[{"start":start,"end":end}],"sources":[{"bucket_id":"deleted-synthetic-source","event_id":1}],"deleted":false,"duration_ns":"untrusted"})
+}
+
+#[test]
+fn creates_task_and_assignment_atomically_with_overlap_rollback() {
+    let client = client(AWConfig::default());
+    put(&client, &format!("nodes/{ROOT}"), Some(0), node(ROOT, None));
+    let edit = json!({"new_task":node(CHILD,Some(ROOT)), "upsert":[entry(MAPPING,CHILD,"2026-10-11T10:00:00Z","2026-10-11T10:15:00Z")],"delete_ids":[]});
+    let (status, _, saved) = put(&client, "bookings", Some(1), edit);
+    assert_eq!(status, Status::Ok);
+    assert_eq!(saved["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(saved["entries"][0]["duration_ns"], "900000000000");
+    let new_id = "00000000-0000-0000-0000-000000000003";
+    let edit = json!({"new_task":node(new_id,Some(ROOT)), "upsert":[entry("00000000-0000-0000-0000-00000000000b",new_id,"2026-10-11T10:10:00Z","2026-10-11T10:20:00Z")],"delete_ids":[]});
+    assert_eq!(
+        put(&client, "bookings", Some(2), edit).0,
+        Status::UnprocessableEntity
+    );
+    let current = client
+        .get(path("nodes/tree"))
+        .header(Header::new("Host", "127.0.0.1:5600"))
+        .dispatch()
+        .into_json::<Value>()
+        .unwrap();
+    assert_eq!(current, saved);
+    let deleted = put(
+        &client,
+        "bookings",
+        Some(2),
+        json!({"new_task":null,"upsert":[],"delete_ids":[MAPPING]}),
+    )
+    .2;
+    assert_eq!(deleted["entries"][0]["deleted"], true);
+    assert_eq!(deleted["nodes"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn booking_retry_does_not_duplicate_task_or_entry() {
+    let client = client(AWConfig::default());
+    put(&client, &format!("nodes/{ROOT}"), Some(0), node(ROOT, None));
+    let edit = json!({"new_task":node(CHILD,Some(ROOT)),"upsert":[entry(MAPPING,CHILD,"2026-10-11T10:00:00Z","2026-10-11T10:15:00Z")],"delete_ids":[]});
+    let send = || {
+        client
+            .put(path("bookings"))
+            .header(Header::new("Host", "127.0.0.1:5600"))
+            .header(ContentType::JSON)
+            .header(Header::new("If-Match", "\"1\""))
+            .header(Header::new("Idempotency-Key", "synthetic-booking"))
+            .body(edit.to_string())
+            .dispatch()
+    };
+    let first = send().into_json::<Value>().unwrap();
+    let replay = send();
+    assert_eq!(replay.status(), Status::Ok);
+    assert_eq!(replay.into_json::<Value>().unwrap(), first);
+    assert_eq!(first["revision"], 2);
+}
+
 #[test]
 fn settings_and_exact_terms_are_validated_and_saved() {
     let client = client(AWConfig::default());

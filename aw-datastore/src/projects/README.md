@@ -1,4 +1,4 @@
-# Project storage foundation (module schema 3)
+# Project storage foundation (module schema 4)
 
 This module uses the host's existing SQLite connection and worker lifecycle.
 It creates only `pt_` tables, preserves AW `user_version`, and leaves bucket,

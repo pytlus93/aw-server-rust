@@ -102,3 +102,59 @@ scoped Clippy passed on Windows/Rust 1.99.0. Added exact-term inheritance,
 invalid decimals/timezones, settings HTTP validation and schema-1-to-3 migration.
 The persistence regression verifies settings, descriptions and fixed terms
 survive restart along with revision history.
+
+## Manual ledger (module schema 4)
+
+Capabilities now advertise `manual_entries` and `atomic_task_assignment`.
+Snapshots add `entries` (defaults to an empty list in older audit/retry records).
+`PUT /workspaces/{uuid}/bookings` uses the existing ETag and idempotency contract:
+
+```json
+{
+  "new_task": null,
+  "upsert": [{
+    "id": "00000000-0000-0000-0000-00000000000a",
+    "node_id": "00000000-0000-0000-0000-000000000001",
+    "description": "Synthetic design review",
+    "intervals": [{"start": "2026-10-11T10:00:00Z", "end": "2026-10-11T10:15:00Z"}],
+    "sources": [{"bucket_id": "synthetic-source", "event_id": 1}],
+    "deleted": false,
+    "duration_ns": ""
+  }],
+  "delete_ids": []
+}
+```
+
+An optional complete `new_task` Node must be a new, unarchived task in this
+workspace, with at least one submitted entry assigned to it. Creation and all
+entries commit as one revision or neither commits. New tasks inherit policies
+when submitted with inherited billing/reporting. No separate task-creation call
+is needed in the Assign flow. A batch permits at most 100 upserts and 100 deletes.
+The snapshot limit is 50,000 entries, including deletion tombstones.
+
+Each entry has a stable UUID, assignment node, description (max 16,384 UTF-8
+bytes), up to 1,000 UTC/offset RFC3339 half-open intervals, up to 1,000 source
+references and a tombstone flag. The server normalizes overlapping/touching spans,
+preserves disjoint gaps, and derives exact decimal-string `duration_ns` from
+nanosecond timestamps; client duration values are never trusted. Each merged
+span must have a positive representable signed-64-bit nanosecond duration.
+No rounding policy is applied. Any overlap between live entries in the same
+workspace is rejected with 422, including offline work and cross-task overlap.
+Adjacent entries are legal. Existing IDs edit/resize/reassign; split is a batch
+deleting one old ID and creating two new IDs. Deletes retain the old entry and
+before/after history, and deleted IDs cannot be reused.
+
+Archived branches reject new/reassigned work. Existing work can still be edited
+or deleted without unarchiving; archiving a node never erases booked entries.
+Source references are nullable event IDs plus bucket IDs, not copied event data,
+and have no captured-event foreign keys. Source deletion, pruning or failed reads
+do not delete bookings. References indicate provenance, not proof that a later
+manually moved/resized interval still matches that source. No booking mutation
+calls AW bucket/event update/delete APIs or changes categories.
+
+Schema-4 local validation (Windows/Rust 1.99.0): 115 tests passed, one existing
+legacy test ignored; formatting and scoped Clippy passed. Added interval union,
+gap preservation, nanosecond and DST-offset duration, split/concurrent overlap,
+archive behavior, atomic task creation/rollback and identical request replay.
+SQLite reopen coverage includes manual entries and missing source references.
+Reports/export snapshots and complete domain backup/restore remain stage 3.

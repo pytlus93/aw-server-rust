@@ -23,6 +23,7 @@ fn snapshot() -> ProjectSnapshot {
             reporting: ReportingPolicy::SelfNode,
         }],
         mappings: vec![],
+        entries: vec![],
     }
 }
 
@@ -36,6 +37,23 @@ fn acknowledged_save_is_visible_on_separate_connection_and_survives_restart() {
     initial.nodes[0].description = "Synthetic milestone".into();
     initial.nodes[0].billing_terms.currency = Some("CZK".into());
     initial.nodes[0].billing_terms.fixed_fee = Some("25000.123456".into());
+    let mut entry = aw_projects::bookings::Entry {
+        id: Uuid::from_u128(10),
+        node_id: initial.nodes[0].id,
+        description: "Synthetic work".into(),
+        intervals: vec![aw_projects::bookings::Span {
+            start: "2026-10-11T10:00:00.000000001Z".parse().unwrap(),
+            end: "2026-10-11T10:15:00.000000002Z".parse().unwrap(),
+        }],
+        sources: vec![aw_projects::bookings::SourceRef {
+            bucket_id: "removed-source".into(),
+            event_id: Some(1),
+        }],
+        deleted: false,
+        duration_ns: "".into(),
+    };
+    entry.normalize().unwrap();
+    initial.entries.push(entry);
     let saved = ds.save_projects(initial).unwrap();
     assert_eq!(saved.revision, 1);
     // Separate WAL reader proves the response comes after commit, before close.
@@ -132,9 +150,9 @@ fn migration_is_idempotent_and_preserves_aw_schema_version() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(count, 4);
     conn.execute(
-        "UPDATE pt_schema_migrations SET version=4 WHERE version=3",
+        "UPDATE pt_schema_migrations SET version=5 WHERE version=4",
         [],
     )
     .unwrap();
@@ -145,7 +163,7 @@ fn migration_is_idempotent_and_preserves_aw_schema_version() {
 fn read_only_legacy_open_does_not_add_project_tables() {
     let conn = Connection::open_in_memory().unwrap();
     aw_datastore::DatastoreInstance::new(&conn, true).unwrap();
-    conn.execute_batch("DROP TABLE pt_idempotency; DROP TABLE pt_domain_revisions; DROP TABLE pt_activity_id_mappings; DROP TABLE pt_nodes; DROP TABLE pt_workspace; DROP TABLE pt_schema_migrations").unwrap();
+    conn.execute_batch("DROP TABLE pt_entries; DROP TABLE pt_idempotency; DROP TABLE pt_domain_revisions; DROP TABLE pt_activity_id_mappings; DROP TABLE pt_nodes; DROP TABLE pt_workspace; DROP TABLE pt_schema_migrations").unwrap();
     aw_datastore::DatastoreInstance::new(&conn, false).unwrap();
     let count: i64 = conn
         .query_row(

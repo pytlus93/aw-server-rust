@@ -7,6 +7,7 @@ use rocket::request::{FromRequest, Outcome};
 use rocket::response::{Responder, Response};
 use rocket::serde::json::Json;
 use rocket::{Request, State};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -140,7 +141,10 @@ fn save(
     retry: Option<aw_datastore::projects::ProjectRetry>,
 ) -> Result<ProjectJson, HttpErrorJson> {
     // Initial bounded snapshot adapter, not an unbounded public overwrite API.
-    if snapshot.nodes.len() > 10_000 || snapshot.mappings.len() > 50_000 {
+    if snapshot.nodes.len() > 10_000
+        || snapshot.mappings.len() > 50_000
+        || snapshot.entries.len() > 50_000
+    {
         return Err(error(
             Status::UnprocessableEntity,
             "workspace resource limit exceeded",
@@ -155,10 +159,67 @@ fn save(
 
 #[get("/capabilities")]
 pub fn capabilities() -> Json<Value> {
-    Json(json!({"api_version": 1, "schema_version": 3,
-        "features": ["nodes", "archive", "dated_activity_ids", "resolved_policy", "workspace_settings", "billing_terms"],
+    Json(json!({"api_version": 1, "schema_version": 4,
+        "features": ["nodes", "archive", "dated_activity_ids", "resolved_policy", "workspace_settings", "billing_terms", "manual_entries", "atomic_task_assignment"],
         "concurrency": "workspace_etag", "idempotency_keys": true,
-        "manual_entries": false, "export_snapshots": false}))
+        "manual_entries": true, "export_snapshots": false}))
+}
+
+#[derive(Deserialize, serde::Serialize)]
+pub struct BookingEdit {
+    pub new_task: Option<Node>,
+    pub upsert: Vec<aw_projects::bookings::Entry>,
+    pub delete_ids: Vec<Uuid>,
+}
+
+#[put("/workspaces/<workspace>/bookings", format = "json", data = "<edit>")]
+pub fn bookings(
+    state: &State<ServerState>,
+    workspace: &str,
+    precondition: Precondition,
+    retry_header: RetryHeader,
+    edit: Json<BookingEdit>,
+) -> Result<ProjectJson, HttpErrorJson> {
+    let _guard = state.project_write_lock.lock().map_err(|_| {
+        error(
+            Status::InternalServerError,
+            "project mutation lock unavailable",
+        )
+    })?;
+    let (replay, retry) =
+        prepare_retry(state, workspace, &precondition, retry_header, json!(&*edit))?;
+    if let Some(response) = replay {
+        return Ok(response);
+    }
+    let mut snapshot = load(state, workspace)?;
+    precondition.check(snapshot.revision)?;
+    let edit = edit.into_inner();
+    if edit.upsert.is_empty() && edit.delete_ids.is_empty() {
+        return Err(error(
+            Status::UnprocessableEntity,
+            "empty booking operation",
+        ));
+    }
+    if let Some(task) = edit.new_task {
+        if task.kind != aw_projects::NodeKind::Task
+            || task.workspace_id != snapshot.workspace_id
+            || task.archived
+            || snapshot.nodes.iter().any(|n| n.id == task.id)
+            || !edit.upsert.iter().any(|e| e.node_id == task.id)
+        {
+            return Err(error(
+                Status::UnprocessableEntity,
+                "invalid new assignment task",
+            ));
+        }
+        snapshot.nodes.push(task);
+    }
+    let tree = Hierarchy::new(snapshot.nodes.clone())
+        .map_err(|e| error(Status::UnprocessableEntity, &format!("{e:?}")))?;
+    snapshot.entries =
+        aw_projects::bookings::apply(&tree, &snapshot.entries, edit.upsert, &edit.delete_ids)
+            .map_err(|e| error(Status::UnprocessableEntity, &e))?;
+    save(state, snapshot, retry)
 }
 
 /// Stable local workspace for the single-user AW interface. Reading it does not

@@ -13,3 +13,4 @@ NDK
 
 # Local validation databases, configs and logs (never publish activity data).
 /local/
+/local-*.log

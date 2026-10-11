@@ -12,6 +12,7 @@ use crate::DatastoreError;
 const MIGRATION: &str = include_str!("../../migrations/projects/0001_domain.sql");
 const MIGRATION_2: &str = include_str!("../../migrations/projects/0002_idempotency.sql");
 const MIGRATION_3: &str = include_str!("../../migrations/projects/0003_workspace_settings.sql");
+const MIGRATION_4: &str = include_str!("../../migrations/projects/0004_entries.sql");
 
 #[derive(Debug, Clone)]
 pub struct ProjectRetry {
@@ -27,6 +28,8 @@ pub struct ProjectSnapshot {
     pub settings: aw_projects::WorkspaceSettings,
     pub nodes: Vec<Node>,
     pub mappings: Vec<ActivityIdMapping>,
+    #[serde(default)]
+    pub entries: Vec<aw_projects::bookings::Entry>,
 }
 
 fn internal(error: impl std::fmt::Display) -> DatastoreError {
@@ -47,7 +50,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), DatastoreError> {
             .map_err(internal)?
             .collect::<rusqlite::Result<_>>()
             .map_err(internal)?;
-        let migrations = [MIGRATION, MIGRATION_2, MIGRATION_3];
+        let migrations = [MIGRATION, MIGRATION_2, MIGRATION_3, MIGRATION_4];
         if rows.len() > migrations.len() {
             return Err(internal("unsupported project schema"));
         }
@@ -176,6 +179,10 @@ pub(crate) fn load(
         .into_iter()
         .map(|json| serde_json::from_str(&json).map_err(internal))
         .collect::<Result<Vec<ActivityIdMapping>, _>>()?;
+    let entries = read("pt_entries")?
+        .into_iter()
+        .map(|json| serde_json::from_str(&json).map_err(internal))
+        .collect::<Result<Vec<aw_projects::bookings::Entry>, _>>()?;
     let settings: Option<String> = conn
         .query_row(
             "SELECT settings_json FROM pt_workspace WHERE id=?1",
@@ -194,6 +201,7 @@ pub(crate) fn load(
         settings,
         nodes,
         mappings,
+        entries,
     })
 }
 
@@ -212,6 +220,8 @@ pub(crate) fn save(
         .map_err(|e| DatastoreError::InvalidProjectData(format!("{e:?}")))?;
     tree.validate_mappings(&candidate.mappings)
         .map_err(|e| DatastoreError::InvalidProjectData(format!("{e:?}")))?;
+    aw_projects::bookings::validate(&tree, &candidate.entries)
+        .map_err(DatastoreError::InvalidProjectData)?;
     if candidate
         .nodes
         .iter()
@@ -242,12 +252,22 @@ pub(crate) fn save(
                 "nodes must be archived, not deleted".into(),
             ));
         }
+        if before
+            .entries
+            .iter()
+            .any(|old| !candidate.entries.iter().any(|new| old.id == new.id))
+        {
+            return Err(DatastoreError::InvalidProjectData(
+                "entries must retain deletion tombstones".into(),
+            ));
+        }
         candidate.revision = before
             .revision
             .checked_add(1)
             .ok_or_else(|| internal("revision overflow"))?;
         candidate.nodes.sort_by_key(|node| node.id);
         candidate.mappings.sort_by_key(|mapping| mapping.id);
+        candidate.entries.sort_by_key(|entry| entry.id);
         let workspace = candidate.workspace_id.to_string();
         let now = Utc::now().timestamp_micros();
         conn.execute("INSERT INTO pt_workspace (id, revision, created_at_us, updated_at_us) VALUES (?1, ?2, ?3, ?3) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, updated_at_us=excluded.updated_at_us", params![workspace, candidate.revision, now]).map_err(internal)?;
@@ -260,6 +280,8 @@ pub(crate) fn save(
         )
         .map_err(internal)?;
         // Delete mappings first; parent references are deferred until commit.
+        conn.execute("DELETE FROM pt_entries WHERE workspace_id=?1", [&workspace])
+            .map_err(internal)?;
         conn.execute(
             "DELETE FROM pt_activity_id_mappings WHERE workspace_id=?1",
             [&workspace],
@@ -272,6 +294,9 @@ pub(crate) fn save(
         }
         for mapping in &candidate.mappings {
             conn.execute("INSERT INTO pt_activity_id_mappings (id, workspace_id, owner_node_id, valid_from, valid_until, activity_id, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![mapping.id.to_string(), workspace, mapping.owner_node_id.to_string(), mapping.valid_from.to_string(), mapping.valid_until.map(|d| d.to_string()), mapping.activity_id, serde_json::to_string(mapping).map_err(internal)?]).map_err(internal)?;
+        }
+        for entry in &candidate.entries {
+            conn.execute("INSERT INTO pt_entries (id, workspace_id, node_id, deleted, body) VALUES (?1, ?2, ?3, ?4, ?5)", params![entry.id.to_string(), workspace, entry.node_id.to_string(), entry.deleted, serde_json::to_string(entry).map_err(internal)?]).map_err(internal)?;
         }
         conn.execute("INSERT INTO pt_domain_revisions (workspace_id, revision, before_json, after_json, recorded_at_us) VALUES (?1, ?2, ?3, ?4, ?5)", params![workspace, candidate.revision, serde_json::to_string(&before).map_err(internal)?, serde_json::to_string(&candidate).map_err(internal)?, now]).map_err(internal)?;
         Ok(candidate)

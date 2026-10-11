@@ -206,6 +206,7 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 projects::capabilities,
                 projects::workspace,
                 projects::put_settings,
+                projects::bookings,
                 projects::nodes,
                 projects::tree,
                 projects::put_node,
