@@ -74,6 +74,57 @@ fn booking_retry_does_not_duplicate_task_or_entry() {
 }
 
 #[test]
+fn deleting_captured_source_does_not_delete_or_rewrite_booked_work() {
+    let client = client(AWConfig::default());
+    let host = Header::new("Host", "127.0.0.1:5600");
+    let bucket = "/api/0/buckets/deleted-synthetic-source";
+    assert_eq!(
+        client
+            .post(bucket)
+            .header(host.clone())
+            .header(ContentType::JSON)
+            .body(
+                json!({"client":"synthetic","type":"synthetic.activity","hostname":"synthetic"})
+                    .to_string()
+            )
+            .dispatch()
+            .status(),
+        Status::Ok
+    );
+    assert_eq!(client.post(format!("{bucket}/events")).header(host.clone()).header(ContentType::JSON).body(json!([{"timestamp":"2026-10-11T10:00:00Z","duration":900,"data":{"title":"Synthetic work"}}]).to_string()).dispatch().status(), Status::Ok);
+    let before = client
+        .get(format!("{bucket}/events"))
+        .header(host.clone())
+        .dispatch()
+        .into_json::<Value>()
+        .unwrap();
+    put(&client, &format!("nodes/{ROOT}"), Some(0), node(ROOT, None));
+    let saved = put(&client, "bookings", Some(1), json!({"new_task":null,"upsert":[entry(MAPPING,ROOT,"2026-10-11T10:00:00Z","2026-10-11T10:15:00Z")],"delete_ids":[]})).2;
+    let after = client
+        .get(format!("{bucket}/events"))
+        .header(host.clone())
+        .dispatch()
+        .into_json::<Value>()
+        .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(
+        client
+            .delete(bucket)
+            .header(host.clone())
+            .dispatch()
+            .status(),
+        Status::Ok
+    );
+    let current = client
+        .get(path("nodes/tree"))
+        .header(host)
+        .dispatch()
+        .into_json::<Value>()
+        .unwrap();
+    assert_eq!(current, saved);
+}
+
+#[test]
 fn settings_and_exact_terms_are_validated_and_saved() {
     let client = client(AWConfig::default());
     let response = client

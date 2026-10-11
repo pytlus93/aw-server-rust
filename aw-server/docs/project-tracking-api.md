@@ -152,9 +152,11 @@ do not delete bookings. References indicate provenance, not proof that a later
 manually moved/resized interval still matches that source. No booking mutation
 calls AW bucket/event update/delete APIs or changes categories.
 
-Schema-4 local validation (Windows/Rust 1.99.0): 115 tests passed, one existing
+Schema-4 local validation (Windows/Rust 1.99.0): 116 tests passed, one existing
 legacy test ignored; formatting and scoped Clippy passed. Added interval union,
 gap preservation, nanosecond and DST-offset duration, split/concurrent overlap,
 archive behavior, atomic task creation/rollback and identical request replay.
 SQLite reopen coverage includes manual entries and missing source references.
+The source-deletion HTTP regression verifies booking leaves captured events
+unchanged and subsequent bucket deletion leaves booked work unchanged.
 Reports/export snapshots and complete domain backup/restore remain stage 3.
